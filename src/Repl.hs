@@ -4,6 +4,7 @@ import Control.Monad
 import Evaluator
 import Exceptions
 import LangParser
+import ListValueTypes
 import System.IO
 
 flushStr :: String -> IO ()
@@ -15,20 +16,21 @@ readPrompt prompt = flushStr prompt >> getLine
 evalString :: Env -> String -> IO String
 evalString env expr =
   runIOThrows $ liftM show $ liftThrows (readExpr expr) >>= eval env
---   return $ extractValue $ trapError (show <$> (readExpr expr >>= eval env))
 
 evalAndPrint :: Env -> String -> IO ()
 evalAndPrint env expr = evalString env expr >>= putStrLn
 
 until_ :: Monad m => (a -> Bool) -> m a -> (a -> m ()) -> m ()
 until_ predicate prompt action = do
-    result <- prompt
-    if predicate result
-        then return ()
-        else action result >> until_ predicate prompt action
+  result <- prompt
+  if predicate result
+    then return ()
+    else action result >> until_ predicate prompt action
 
 runRepl :: IO ()
-runRepl = nullEnv >>= until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
+runRepl =
+  primitiveBindings >>=
+  until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
 
 runOne :: String -> IO ()
-runOne expr = nullEnv >>= flip evalAndPrint expr
+runOne expr = primitiveBindings >>= flip evalAndPrint expr

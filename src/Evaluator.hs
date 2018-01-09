@@ -12,13 +12,21 @@ data Unpacker =
   forall a. Eq a =>
             AnyUnpacker (LispVal -> ThrowsError a)
 
-type Env = IORef [(String, IORef LispVal)]
-
 eval :: Env -> LispVal -> IOThrowsError LispVal
+eval env (List (Atom "define":List (Atom var:params):body)) =
+  makeNormalFunc env params body >>= defineVar env var
+eval env (List (Atom "define":DottedList (Atom var:params) varargs:body)) =
+  makeVarArgs varargs env params body >>= defineVar env var
+eval env (List (Atom "lambda":List params:body)) =
+  makeNormalFunc env params body
+eval env (List (Atom "lambda":DottedList params varargs:body)) =
+  makeVarArgs varargs env params body
+eval env (List (Atom "lambda":varargs@(Atom _):body)) =
+  makeVarArgs varargs env [] body
 eval _ val@(String _) = return val
 eval _ val@(Number _) = return val
 eval _ val@(Bool _) = return val
-eval env (Atom id) = getVar env id
+eval env (Atom name) = getVar env name
 eval _ (List [Atom "quote", val]) = return val
 eval env (List [Atom "if", predicate, conseq, alt]) = do
   result <- eval env predicate
@@ -26,16 +34,40 @@ eval env (List [Atom "if", predicate, conseq, alt]) = do
     Bool False -> eval env alt
     _ -> eval env conseq
 eval env (List [Atom "set!", Atom var, form]) = eval env form >>= setVar env var
-eval env (List [Atom "define", Atom var, form]) = eval env form >>= defineVar env var
-eval env (List (Atom func:args)) = mapM (eval env) args >>= liftThrows . apply func
+eval env (List [Atom "define", Atom var, form]) =
+  eval env form >>= defineVar env var
+eval env (List (function:args)) = do
+  func <- eval env function
+  argVals <- mapM (eval env) args
+  apply func argVals
 eval _ badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
 
-apply :: String -> [LispVal] -> ThrowsError LispVal
-apply func args =
-  maybe
-    (throwError $ NotFunction "Unrecognized primitive function args" func)
-    ($ args)
-    (lookup func primitives)
+makeFunc ::
+     (Show a, Monad m) => Maybe String -> Env -> [a] -> [LispVal] -> m LispVal
+makeFunc varargs env params body =
+  return $ Func (map show params) varargs body env
+
+makeNormalFunc :: Env -> [LispVal] -> [LispVal] -> IOThrowsError LispVal
+makeNormalFunc = makeFunc Nothing
+
+makeVarArgs :: LispVal -> Env -> [LispVal] -> [LispVal] -> IOThrowsError LispVal
+makeVarArgs = makeFunc . Just . show
+
+apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
+apply (PrimitiveFunc func) args = liftThrows $ func args
+apply (Func params varargs body closure) args =
+  if num params /= num args && isNothing varargs
+    then throwError $ NumArgs (num params) args
+    else liftIO (bindVars closure $ zip params args) >>= bindVarArgs varargs >>=
+         evalBody
+  where
+    remainingArgs = drop (length params) args
+    num = toInteger . length
+    evalBody env = last <$> mapM (eval env) body
+    bindVarArgs arg env =
+      case arg of
+        Just argName -> liftIO $ bindVars env [(argName, List remainingArgs)]
+        Nothing -> return env
 
 primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives =
@@ -66,6 +98,11 @@ primitives =
   , ("eqv?", eqv)
   , ("equal?", equal)
   ]
+
+primitiveBindings :: IO Env
+primitiveBindings = nullEnv >>= flip bindVars (map makePrimitiveFunc primitives)
+  where
+    makePrimitiveFunc (var, func) = (var, PrimitiveFunc func)
 
 numericBinop ::
      (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
@@ -143,7 +180,7 @@ eqv [List arg1, List arg2] =
   where
     eqvPair (x1, x2) =
       case eqv [x1, x2] of
-        Left err -> False
+        Left _ -> False
         Right (Bool val) -> val
 eqv [_, _] = return $ Bool False
 eqv badArgList = throwError $ NumArgs 2 badArgList
@@ -176,12 +213,18 @@ isBound envRef var = isJust . lookup var <$> readIORef envRef
 getVar :: Env -> String -> IOThrowsError LispVal
 getVar envRef var = do
   env <- liftIO $ readIORef envRef
-  maybe (throwError $ UnboundVar "Getting an unbound variable" var) (liftIO . readIORef) (lookup var env)
+  maybe
+    (throwError $ UnboundVar "Getting an unbound variable" var)
+    (liftIO . readIORef)
+    (lookup var env)
 
 setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
 setVar envRef var value = do
   env <- liftIO $ readIORef envRef
-  maybe (throwError $ UnboundVar "Setting an unbound variable" var) (liftIO . flip writeIORef value) (lookup var env)
+  maybe
+    (throwError $ UnboundVar "Setting an unbound variable" var)
+    (liftIO . flip writeIORef value)
+    (lookup var env)
   return value
 
 defineVar :: Env -> String -> LispVal -> IOThrowsError LispVal
@@ -190,15 +233,15 @@ defineVar envRef var value = do
   if alreadyDefined
     then setVar envRef var value
     else liftIO $ do
-      valueRef <- newIORef value
-      env <- readIORef envRef
-      writeIORef envRef ((var, valueRef) : env)
-      return value
+           valueRef <- newIORef value
+           env <- readIORef envRef
+           writeIORef envRef ((var, valueRef) : env)
+           return value
 
 bindVars :: Env -> [(String, LispVal)] -> IO Env
 bindVars envRef bindings = readIORef envRef >>= extendEnv >>= newIORef
   where
-    extendEnv env = fmap (++env) (mapM addBinding bindings)
-    addBinding (var, value) = do 
+    extendEnv env = fmap (++ env) (mapM addBinding bindings)
+    addBinding (var, value) = do
       ref <- newIORef value
       return (var, ref)
