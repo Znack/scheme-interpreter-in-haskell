@@ -6,7 +6,9 @@ import Control.Monad.Error
 import Data.IORef
 import Data.Maybe
 import Exceptions
+import LangParser
 import ListValueTypes
+import System.IO
 
 data Unpacker =
   forall a. Eq a =>
@@ -36,6 +38,8 @@ eval env (List [Atom "if", predicate, conseq, alt]) = do
 eval env (List [Atom "set!", Atom var, form]) = eval env form >>= setVar env var
 eval env (List [Atom "define", Atom var, form]) =
   eval env form >>= defineVar env var
+eval env (List [Atom "load", String filename]) =
+  load filename >>= fmap last . mapM (eval env)
 eval env (List (function:args)) = do
   func <- eval env function
   argVals <- mapM (eval env) args
@@ -55,6 +59,7 @@ makeVarArgs = makeFunc . Just . show
 
 apply :: LispVal -> [LispVal] -> IOThrowsError LispVal
 apply (PrimitiveFunc func) args = liftThrows $ func args
+apply (IOFunc func) args = func args
 apply (Func params varargs body closure) args =
   if num params /= num args && isNothing varargs
     then throwError $ NumArgs (num params) args
@@ -68,6 +73,10 @@ apply (Func params varargs body closure) args =
       case arg of
         Just argName -> liftIO $ bindVars env [(argName, List remainingArgs)]
         Nothing -> return env
+
+applyProc :: [LispVal] -> IOThrowsError LispVal
+applyProc [func, List args] = apply func args
+applyProc (func:args) = apply func args
 
 primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives =
@@ -99,10 +108,28 @@ primitives =
   , ("equal?", equal)
   ]
 
+ioPrimitives :: [(String, [LispVal] -> IOThrowsError LispVal)]
+ioPrimitives =
+  [ ("apply", applyProc)
+  , ("open-input-file", makePort ReadMode)
+  , ("open-output-file", makePort WriteMode)
+  , ("close-input-file", closePort)
+  , ("close-output-file", closePort)
+  , ("read", readProc)
+  , ("write", writeProc)
+  , ("read-contents", readContents)
+  , ("read-all", readAll)
+  ]
+
 primitiveBindings :: IO Env
-primitiveBindings = nullEnv >>= flip bindVars (map makePrimitiveFunc primitives)
+primitiveBindings =
+  nullEnv >>=
+  flip
+    bindVars
+    (map (makeFunc IOFunc) ioPrimitives ++
+     map (makeFunc PrimitiveFunc) primitives)
   where
-    makePrimitiveFunc (var, func) = (var, PrimitiveFunc func)
+    makeFunc constructor (var, func) = (var, constructor func)
 
 numericBinop ::
      (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
@@ -203,6 +230,30 @@ equal [arg1, arg2] = do
        let (Bool x) = eqvEquals
        in x)
 equal badArgs = throwError $ NumArgs 2 badArgs
+
+makePort :: IOMode -> [LispVal] -> IOThrowsError LispVal
+makePort mode [String filename] = fmap Port $ liftIO $ openFile filename mode
+
+closePort :: [LispVal] -> IOThrowsError LispVal
+closePort [Port port] = liftIO $ hClose port >> return (Bool True)
+closePort _ = return $ Bool False
+
+readProc :: [LispVal] -> IOThrowsError LispVal
+readProc [] = readProc [Port stdin]
+readProc [Port port] = liftIO (hGetLine port) >>= liftThrows . readExpr
+
+writeProc :: [LispVal] -> IOThrowsError LispVal
+writeProc [obj] = writeProc [obj, Port stdout]
+writeProc [obj, Port port] = liftIO $ hPrint port obj >> return (Bool True)
+
+readContents :: [LispVal] -> IOThrowsError LispVal
+readContents [String filename] = fmap String $ liftIO $ readFile filename
+
+load :: String -> IOThrowsError [LispVal]
+load filename = liftIO (readFile filename) >>= liftThrows . readExprList
+
+readAll :: [LispVal] -> IOThrowsError LispVal
+readAll [String filename] = fmap List (load filename)
 
 nullEnv :: IO Env
 nullEnv = newIORef []

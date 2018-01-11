@@ -2,6 +2,7 @@ module ListValueTypes where
 
 import Control.Monad.Error
 import Data.IORef
+import System.IO
 import Text.Parsec
 
 type Env = IORef [(String, IORef LispVal)]
@@ -14,7 +15,9 @@ data LispVal
   | Number Integer
   | String String
   | Bool Bool
+  | Port Handle
   | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
+  | IOFunc ([LispVal] -> IOThrowsError LispVal)
   | Func { fparams :: [String]
          , fvararg :: Maybe String
          , fbody :: [LispVal]
@@ -28,7 +31,9 @@ instance Show LispVal where
   show (Bool False) = "#f"
   show (List contents) = "(" ++ unwordsList contents ++ ")"
   show (DottedList h t) = "(" ++ unwordsList h ++ " . " ++ show t ++ ")"
+  show (Port _) = "<IO port>"
   show (PrimitiveFunc _) = "<primitive>"
+  show (IOFunc _) = "<IO primitive>"
   show Func{fparams = args, fvararg = varargs} =
     "(lambda (" ++
     unwords (map show args) ++
