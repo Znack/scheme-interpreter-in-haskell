@@ -1,11 +1,11 @@
 module Repl where
 
-import Control.Monad
-import Evaluator
-import Exceptions
-import LangParser
-import ListValueTypes
-import System.IO
+import Control.Monad (liftM)
+import Evaluator (bindVars, eval, primitiveBindings)
+import Exceptions (liftThrows, runIOThrows)
+import LangParser (readExpr)
+import ListValueTypes (Env, LispVal (Atom, List, String))
+import System.IO (hFlush, hPutStrLn, stderr, stdout)
 
 flushStr :: String -> IO ()
 flushStr str = putStr str >> hFlush stdout
@@ -29,13 +29,13 @@ until_ predicate prompt action = do
 
 runRepl :: IO ()
 runRepl =
-  primitiveBindings >>=
-  until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
+  primitiveBindings
+    >>= until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
 
 runOne :: [String] -> IO ()
 runOne args = do
   env <-
-    primitiveBindings >>=
-    flip bindVars [("args", List $ map String $ drop 1 args)]
-  runIOThrows (show <$> eval env (List [Atom "load", String (head args)])) >>=
-    hPutStrLn stderr
+    primitiveBindings
+      >>= flip bindVars [("args", List $ map String $ drop 1 args)]
+  runIOThrows (show <$> eval env (List [Atom "load", String (head args)]))
+    >>= hPutStrLn stderr

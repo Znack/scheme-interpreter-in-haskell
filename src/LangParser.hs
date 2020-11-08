@@ -1,10 +1,11 @@
 module LangParser where
 
-import Control.Monad
-import Control.Monad.Error
-import Exceptions
+import Control.Monad.Except (MonadError (throwError))
 import ListValueTypes
-import System.Environment
+  ( LispError (Parser),
+    LispVal (Atom, Bool, DottedList, List, Number, String),
+    ThrowsError,
+  )
 import Text.ParserCombinators.Parsec hiding (spaces)
 
 symbol :: Parser Char
@@ -18,6 +19,7 @@ readOrThrow parser input = case parse parser "lisp" input of
 readExpr :: String -> ThrowsError LispVal
 readExpr =
   readOrThrow parseExpr
+
 readExprList :: String -> ThrowsError [LispVal]
 readExprList = readOrThrow (endBy parseExpr spaces)
 

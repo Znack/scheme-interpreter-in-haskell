@@ -2,28 +2,57 @@
 
 module Evaluator where
 
-import Control.Monad.Error
-import Data.IORef
-import Data.Maybe
-import Exceptions
-import LangParser
+import Control.Monad.Except
+  ( MonadError (catchError, throwError),
+    MonadIO (liftIO),
+  )
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.Maybe (isJust, isNothing)
+import Exceptions (liftThrows)
+import LangParser (readExpr, readExprList)
 import ListValueTypes
+  ( Env,
+    IOThrowsError,
+    LispError (BadSpecialForm, NumArgs, TypeMismatch, UnboundVar),
+    LispVal
+      ( Atom,
+        Bool,
+        DottedList,
+        Func,
+        IOFunc,
+        List,
+        Number,
+        Port,
+        PrimitiveFunc,
+        String
+      ),
+    ThrowsError,
+  )
 import System.IO
+  ( IOMode (ReadMode, WriteMode),
+    hClose,
+    hGetLine,
+    hPrint,
+    openFile,
+    stdin,
+    stdout,
+  )
 
-data Unpacker =
-  forall a. Eq a =>
-            AnyUnpacker (LispVal -> ThrowsError a)
+data Unpacker
+  = forall a.
+    Eq a =>
+    AnyUnpacker (LispVal -> ThrowsError a)
 
 eval :: Env -> LispVal -> IOThrowsError LispVal
-eval env (List (Atom "define":List (Atom var:params):body)) =
+eval env (List (Atom "define" : List (Atom var : params) : body)) =
   makeNormalFunc env params body >>= defineVar env var
-eval env (List (Atom "define":DottedList (Atom var:params) varargs:body)) =
+eval env (List (Atom "define" : DottedList (Atom var : params) varargs : body)) =
   makeVarArgs varargs env params body >>= defineVar env var
-eval env (List (Atom "lambda":List params:body)) =
+eval env (List (Atom "lambda" : List params : body)) =
   makeNormalFunc env params body
-eval env (List (Atom "lambda":DottedList params varargs:body)) =
+eval env (List (Atom "lambda" : DottedList params varargs : body)) =
   makeVarArgs varargs env params body
-eval env (List (Atom "lambda":varargs@(Atom _):body)) =
+eval env (List (Atom "lambda" : varargs@(Atom _) : body)) =
   makeVarArgs varargs env [] body
 eval _ val@(String _) = return val
 eval _ val@(Number _) = return val
@@ -40,14 +69,14 @@ eval env (List [Atom "define", Atom var, form]) =
   eval env form >>= defineVar env var
 eval env (List [Atom "load", String filename]) =
   load filename >>= fmap last . mapM (eval env)
-eval env (List (function:args)) = do
+eval env (List (function : args)) = do
   func <- eval env function
   argVals <- mapM (eval env) args
   apply func argVals
 eval _ badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
 
 makeFunc ::
-     (Show a, Monad m) => Maybe String -> Env -> [a] -> [LispVal] -> m LispVal
+  (Show a, Monad m) => Maybe String -> Env -> [a] -> [LispVal] -> m LispVal
 makeFunc varargs env params body =
   return $ Func (map show params) varargs body env
 
@@ -63,8 +92,9 @@ apply (IOFunc func) args = func args
 apply (Func params varargs body closure) args =
   if num params /= num args && isNothing varargs
     then throwError $ NumArgs (num params) args
-    else liftIO (bindVars closure $ zip params args) >>= bindVarArgs varargs >>=
-         evalBody
+    else
+      liftIO (bindVars closure $ zip params args) >>= bindVarArgs varargs
+        >>= evalBody
   where
     remainingArgs = drop (length params) args
     num = toInteger . length
@@ -76,72 +106,73 @@ apply (Func params varargs body closure) args =
 
 applyProc :: [LispVal] -> IOThrowsError LispVal
 applyProc [func, List args] = apply func args
-applyProc (func:args) = apply func args
+applyProc (func : args) = apply func args
 
 primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives =
-  [ ("+", numericBinop (+))
-  , ("-", numericBinop (-))
-  , ("*", numericBinop (*))
-  , ("/", numericBinop div)
-  , ("mod", numericBinop mod)
-  , ("quotient", numericBinop quot)
-  , ("remainder", numericBinop rem)
-  , ("=", numBoolBinop (==))
-  , ("<", numBoolBinop (<))
-  , (">", numBoolBinop (>))
-  , ("/=", numBoolBinop (/=))
-  , (">=", numBoolBinop (>=))
-  , ("<=", numBoolBinop (<=))
-  , ("&&", boolBoolBinop (&&))
-  , ("||", boolBoolBinop (||))
-  , ("string=?", strBoolBinop (==))
-  , ("string<?", strBoolBinop (<))
-  , ("string>?", strBoolBinop (>))
-  , ("string<=?", strBoolBinop (<=))
-  , ("string>=?", strBoolBinop (>=))
-  , ("car", car)
-  , ("cdr", cdr)
-  , ("cons", cons)
-  , ("eq?", eqv)
-  , ("eqv?", eqv)
-  , ("equal?", equal)
+  [ ("+", numericBinop (+)),
+    ("-", numericBinop (-)),
+    ("*", numericBinop (*)),
+    ("/", numericBinop div),
+    ("mod", numericBinop mod),
+    ("quotient", numericBinop quot),
+    ("remainder", numericBinop rem),
+    ("=", numBoolBinop (==)),
+    ("<", numBoolBinop (<)),
+    (">", numBoolBinop (>)),
+    ("/=", numBoolBinop (/=)),
+    (">=", numBoolBinop (>=)),
+    ("<=", numBoolBinop (<=)),
+    ("&&", boolBoolBinop (&&)),
+    ("||", boolBoolBinop (||)),
+    ("string=?", strBoolBinop (==)),
+    ("string<?", strBoolBinop (<)),
+    ("string>?", strBoolBinop (>)),
+    ("string<=?", strBoolBinop (<=)),
+    ("string>=?", strBoolBinop (>=)),
+    ("car", car),
+    ("cdr", cdr),
+    ("cons", cons),
+    ("eq?", eqv),
+    ("eqv?", eqv),
+    ("equal?", equal)
   ]
 
 ioPrimitives :: [(String, [LispVal] -> IOThrowsError LispVal)]
 ioPrimitives =
-  [ ("apply", applyProc)
-  , ("open-input-file", makePort ReadMode)
-  , ("open-output-file", makePort WriteMode)
-  , ("close-input-file", closePort)
-  , ("close-output-file", closePort)
-  , ("read", readProc)
-  , ("write", writeProc)
-  , ("read-contents", readContents)
-  , ("read-all", readAll)
+  [ ("apply", applyProc),
+    ("open-input-file", makePort ReadMode),
+    ("open-output-file", makePort WriteMode),
+    ("close-input-file", closePort),
+    ("close-output-file", closePort),
+    ("read", readProc),
+    ("write", writeProc),
+    ("read-contents", readContents),
+    ("read-all", readAll)
   ]
 
 primitiveBindings :: IO Env
 primitiveBindings =
-  nullEnv >>=
-  flip
-    bindVars
-    (map (makeFunc IOFunc) ioPrimitives ++
-     map (makeFunc PrimitiveFunc) primitives)
+  nullEnv
+    >>= flip
+      bindVars
+      ( map (makeFunc IOFunc) ioPrimitives
+          ++ map (makeFunc PrimitiveFunc) primitives
+      )
   where
     makeFunc constructor (var, func) = (var, constructor func)
 
 numericBinop ::
-     (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
+  (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
 numericBinop _ [] = throwError $ NumArgs 2 []
 numericBinop _ [singleValue] = throwError $ NumArgs 2 [singleValue]
 numericBinop op params = (Number . foldl1 op) <$> mapM unpackNum params
 
 boolBinop ::
-     (LispVal -> ThrowsError a)
-  -> (a -> a -> Bool)
-  -> [LispVal]
-  -> ThrowsError LispVal
+  (LispVal -> ThrowsError a) ->
+  (a -> a -> Bool) ->
+  [LispVal] ->
+  ThrowsError LispVal
 boolBinop unpacker op [first, second] =
   (\x y -> Bool $ op x y) <$> unpacker first <*> unpacker second
 boolBinop _ _ args = throwError $ NumArgs 2 args
@@ -159,9 +190,9 @@ unpackNum :: LispVal -> ThrowsError Integer
 unpackNum (Number n) = return n
 unpackNum (String n) =
   let parsed = reads n :: [(Integer, String)]
-  in case parsed of
-       [] -> throwError $ TypeMismatch "number" (String n)
-       [(val, _)] -> return val
+   in case parsed of
+        [] -> throwError $ TypeMismatch "number" (String n)
+        [(val, _)] -> return val
 unpackNum (List [n]) = unpackNum n
 unpackNum unrecognized = throwError $ TypeMismatch "number" unrecognized
 
@@ -176,15 +207,15 @@ unpackBool (Bool b) = return b
 unpackBool notBool = throwError $ TypeMismatch "boolean" notBool
 
 car :: [LispVal] -> ThrowsError LispVal
-car [List (x:_)] = return x
-car [DottedList (x:_) _] = return x
+car [List (x : _)] = return x
+car [DottedList (x : _) _] = return x
 car [badArg] = throwError $ TypeMismatch "pair" badArg
 car badArgs = throwError $ NumArgs 1 badArgs
 
 cdr :: [LispVal] -> ThrowsError LispVal
-cdr [List (_:xs)] = return $ List xs
+cdr [List (_ : xs)] = return $ List xs
 cdr [DottedList [_] x] = return x
-cdr [DottedList (_:xs) x] = return $ DottedList xs x
+cdr [DottedList (_ : xs) x] = return $ DottedList xs x
 cdr [badArg] = throwError $ TypeMismatch "pair" badArg
 cdr badArgList = throwError $ NumArgs 1 badArgList
 
@@ -219,16 +250,17 @@ unpackEquals arg1 arg2 (AnyUnpacker unpacker) =
 equal :: [LispVal] -> ThrowsError LispVal
 equal [arg1, arg2] = do
   primitiveEquals <-
-    or <$>
-    mapM
-      (unpackEquals arg1 arg2)
-      [AnyUnpacker unpackNum, AnyUnpacker unpackStr, AnyUnpacker unpackBool]
+    or
+      <$> mapM
+        (unpackEquals arg1 arg2)
+        [AnyUnpacker unpackNum, AnyUnpacker unpackStr, AnyUnpacker unpackBool]
   eqvEquals <- eqv [arg1, arg2]
   return $
     Bool
-      (primitiveEquals ||
-       let (Bool x) = eqvEquals
-       in x)
+      ( primitiveEquals
+          || let (Bool x) = eqvEquals
+              in x
+      )
 equal badArgs = throwError $ NumArgs 2 badArgs
 
 makePort :: IOMode -> [LispVal] -> IOThrowsError LispVal
@@ -284,10 +316,10 @@ defineVar envRef var value = do
   if alreadyDefined
     then setVar envRef var value
     else liftIO $ do
-           valueRef <- newIORef value
-           env <- readIORef envRef
-           writeIORef envRef ((var, valueRef) : env)
-           return value
+      valueRef <- newIORef value
+      env <- readIORef envRef
+      writeIORef envRef ((var, valueRef) : env)
+      return value
 
 bindVars :: Env -> [(String, LispVal)] -> IO Env
 bindVars envRef bindings = readIORef envRef >>= extendEnv >>= newIORef

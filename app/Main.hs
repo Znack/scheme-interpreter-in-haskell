@@ -1,11 +1,7 @@
 module Main where
 
-import Control.Monad
-import Evaluator
-import Exceptions
-import LangParser
-import Repl
-import System.Environment
+import Repl (runOne, runRepl)
+import System.Environment (getArgs)
 
 main :: IO ()
 main = do
